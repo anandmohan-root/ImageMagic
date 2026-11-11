@@ -51,10 +51,22 @@ Code: [bgreplacer/pipeline.py](bgreplacer/pipeline.py) (processing) and [bgrepla
 
 These steps also set the app up on another PC after cloning the repository. The repository holds only the source code. The Python environment, the models (about 2.1 GB) and the portable build are too large for GitHub and are recreated by the steps below.
 
-Requires Python 3.11+ (tested with 3.13).
+Requires Git and Python 3.11+ (tested with 3.13).
+
+On a new PC, get the code first:
 
 ```bash
-py -3.13 -m venv .venv
+git clone https://github.com/anandmohan-root/ImageMagic.git
+```
+
+```bash
+cd ImageMagic
+```
+
+Then create the Python environment and install the libraries:
+
+```bash
+py -m venv .venv
 ```
 
 ```bash
