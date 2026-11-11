@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest
+onnx                 # tests build a tiny stand-in model
+pyinstaller

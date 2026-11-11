@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Build output (recreate with scripts/make_portable.py)
+build/
+dist/
+
+# Model files: too large for GitHub (up to 970 MB each).
+# Download them once with: python scripts/fetch_models.py
+models/*.onnx
+models/*.part
+
+# Windows shortcuts hold absolute paths of one PC
+*.lnk

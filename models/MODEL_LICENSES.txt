@@ -1,0 +1,29 @@
+Bundled models
+
+BiRefNet-general-epoch_244.onnx  (main cut-out model)
+  Source:  https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/
+  Licence: MIT, Copyright (c) 2024 ZhengPeng (repository licence; the weights
+           ship without a separate licence)
+  Input:   1x3x1024x1024, ImageNet mean/std normalisation, sigmoid output
+
+isnet-general-use.onnx  (fallback cut-out model)
+  Source:  https://github.com/danielgatis/rembg/releases/download/v0.0.0/
+  Licence: Apache License 2.0 (IS-Net / DIS, github.com/xuebinqin/DIS)
+  Input:   1x3x1024x1024, x/255 - 0.5
+
+BiRefNet-matting-epoch_100.onnx  (optional: "Fine hair" edges)
+  Source:  https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/
+  Licence: MIT repository licence, as above. No separate licence is stated for
+           the matting weights or their training data (checked 2026-11-10).
+           Fine for personal use; verify before selling or distributing the app.
+  Input:   1x3x1024x1024, ImageNet mean/std normalisation, sigmoid output
+
+depth-anything-v2-small.onnx  (optional: depth-aware blur)
+  Source:  https://huggingface.co/onnx-community/depth-anything-v2-small
+           (file onnx/model.onnx)
+  Licence: Apache License 2.0. The authors state: "Depth-Anything-V2-Small model
+           is under the Apache-2.0 license." (github.com/DepthAnything/Depth-Anything-V2)
+           The Base/Large/Giant models are CC-BY-NC-4.0 and are NOT used here.
+  Input:   1x3xHxW (multiples of 14, shorter side 518), ImageNet mean/std
+
+SHA256 checksums of the downloaded files are in SHA256SUMS.txt.

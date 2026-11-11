@@ -1,0 +1,5 @@
+PySide6
+onnxruntime          # CPU. For GPU via DirectML, install onnxruntime-directml instead.
+pillow
+opencv-python-headless
+numpy
