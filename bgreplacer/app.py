@@ -780,10 +780,9 @@ class MainWindow(QWidget):
         self.setMinimumSize(1040, 720)
         self.setFocusPolicy(Qt.ClickFocus)
         self.segmenter = None             # loaded on first use, then kept
-        self.fine_model = None            # matting model, loaded when Fine hair is used
+        self.fine_model = None            # matting model for fine hair, loaded on first use
         self.depth_model = None           # loaded on first use
         self.models_dir = None            # None = the app's own models folder
-        self.fine = False                 # "Fine hair" cut-out chosen
         self.cache = (None, None)         # (inputs key, Prepared) - skip re-cutting
         self.thread = None
         self.last_output = ""
@@ -880,28 +879,6 @@ class MainWindow(QWidget):
             lay.addWidget(section(label))
             lay.addWidget(card)
             lay.addSpacing(4)
-        self.cut_box = QWidget()
-        cut = QVBoxLayout(self.cut_box)
-        cut.setContentsMargins(0, 0, 0, 0)
-        cut.setSpacing(10)
-        cut.addWidget(section("CUT-OUT"))
-        chips = QHBoxLayout()
-        chips.setSpacing(8)
-        self.cut_group = QButtonGroup(self)
-        for fine, text, tip in ((False, "Standard", "Crisp edges. Best for most photos."),
-                                (True, "Fine hair", "Softer, see-through edges for loose hair "
-                                                    "and fur. Takes about 15 s longer.")):
-            chip = QPushButton(text, objectName="chip", checkable=True)
-            chip.setCursor(Qt.PointingHandCursor)
-            chip.setToolTip(tip)
-            chip.setProperty("fine", fine)
-            chip.setChecked(not fine)
-            self.cut_group.addButton(chip)
-            chips.addWidget(chip)
-        self.cut_group.buttonClicked.connect(lambda b: self.set_fine(b.property("fine")))
-        cut.addLayout(chips)
-        self.cut_box.setVisible(pipeline.find_fine_model() is not None)
-        lay.addWidget(self.cut_box)
         lay.addStretch()
         self.next_btn = tool_button("Start new", "reset", self.c["accent"])
         self.next_btn.setToolTip("Clear the photo, background and settings and start again. "
@@ -1184,7 +1161,7 @@ class MainWindow(QWidget):
         self.refresh()
 
     def start_new(self):
-        """Back to a fresh start: no photo, no background, Standard cut-out.
+        """Back to a fresh start: no photo, no background.
         Only the output folder (and whether you chose it) is kept."""
         if self.busy():
             return
@@ -1192,7 +1169,6 @@ class MainWindow(QWidget):
             card.blockSignals(True)            # plain reset: no "photo picked" handling
             card.clear()
             card.blockSignals(False)
-        self.set_fine(False)
         self.cache = (None, None)              # also frees the last cut-out's memory
         self.last_output = ""
         self.view.set_before(None)
@@ -1202,11 +1178,6 @@ class MainWindow(QWidget):
         self.next_btn.hide()
         self.set_status(START_TEXT)
         self.refresh()
-
-    def set_fine(self, fine: bool):
-        self.fine = bool(fine)
-        for chip in self.cut_group.buttons():
-            chip.setChecked(chip.property("fine") == self.fine)
 
     def on_other(self, *_):
         if self.ready():
@@ -1272,9 +1243,8 @@ class MainWindow(QWidget):
         if not self.ready() or self.busy():
             return
         main, bg = self.main_card.path, (self.bg_card.path or None)
-        fine = self.fine
         key = (main, Path(main).stat().st_mtime_ns, bg,
-               Path(bg).stat().st_mtime_ns if bg else None, fine)
+               Path(bg).stat().st_mtime_ns if bg else None)
         if self.cache[0] == key:
             self.enter_edit(self.cache[1])
             return
@@ -1283,7 +1253,7 @@ class MainWindow(QWidget):
             if self.segmenter is None:
                 progress(2, "Loading model (first run only)…")
                 self.segmenter = pipeline.Segmenter.load_default(self.models_dir)
-            fine_path = pipeline.find_fine_model(self.models_dir) if fine else None
+            fine_path = pipeline.find_fine_model(self.models_dir)
             if fine_path and self.fine_model is None:
                 progress(3, "Loading model (fine hair)…")
                 self.fine_model = pipeline.Segmenter(fine_path)

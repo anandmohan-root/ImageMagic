@@ -143,7 +143,7 @@ def fuse_masks(general: np.ndarray, matting: np.ndarray) -> np.ndarray:
         return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
 
     core = cv2.erode(solid, disc(0.012)).astype(np.float32)          # surely subject
-    outside = 1.0 - cv2.dilate(solid, disc(0.04)).astype(np.float32)  # surely background
+    outside = 1.0 - cv2.dilate(solid, disc(0.06)).astype(np.float32)  # surely background
     band = cv2.GaussianBlur(1.0 - core - outside, (0, 0), 0.004 * size)
 
     def nearby(where):                       # matting's average over nearby sure pixels
@@ -355,6 +355,62 @@ def tone(img, adj: tuple) -> np.ndarray:
         grey = x @ np.array([0.299, 0.587, 0.114], np.float32)
         x = grey[..., None] + (x - grey[..., None]) * (1.0 + s / 100)
     return (np.clip(x, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
+def unmix_edges(img: Image.Image, alpha: np.ndarray, size: int | None = None) -> np.ndarray:
+    """Open the gaps between hair strands.
+
+    A matte from a 1024-pixel model treats a tuft of hair as one soft blob,
+    so old background seen between the strands stays visible. Near the
+    outline, each pixel is compared with the local subject colour F and the
+    local background colour B (I = a*F + (1-a)*B, solved for a per pixel).
+    Pixels that are plainly background-coloured are made transparent. The
+    step only ever lowers alpha, only near the outline, and only where F and
+    B are clearly different colours. It repeats a few times: each pass can
+    reach further in, but only through places where gaps were really found,
+    so a solid body edge stops it."""
+    size = size or max(img.size)
+    ys, xs_ = np.nonzero(alpha > 0.02)
+    if not len(ys):
+        return alpha
+    m = round(0.04 * size)                            # work inside the subject's box only
+    t, b = max(0, ys.min() - m), min(alpha.shape[0], ys.max() + m + 1)
+    l, r_ = max(0, xs_.min() - m), min(alpha.shape[1], xs_.max() + m + 1)
+    if (t, l, b, r_) != (0, 0, *alpha.shape):
+        out = alpha.copy()
+        out[t:b, l:r_] = unmix_edges(img.crop((l, t, r_, b)), alpha[t:b, l:r_], size)
+        return out
+    w, h = img.size
+    q = min(1.0, 1500 / size)                         # colour fields at reduced scale
+    x = np.asarray(img, dtype=np.float32) / 255.0
+    xs = cv2.resize(x, None, fx=q, fy=q, interpolation=cv2.INTER_AREA) if q < 1 else x
+    k = max(3, round(0.05 * size * q)) | 1
+    out = alpha
+    for _ in range(4):
+        a = cv2.resize(out, (xs.shape[1], xs.shape[0]), interpolation=cv2.INTER_AREA)
+        ba = cv2.blur(a, (k, k))[..., None]
+        fg = cv2.blur(xs * a[..., None], (k, k)) / (ba + 1e-4)
+        # B from surely-background pixels only: soft hair pixels would darken it
+        clear = (a < 0.05).astype(np.float32)
+        seen = cv2.blur(clear, (k, k))
+        bg = cv2.blur(xs * clear[..., None], (k, k)) / (seen[..., None] + 1e-4)
+        # edge zone: within about 1.5 % of the picture size from background or open gaps
+        r = max(3, round(0.03 * size * q)) | 1
+        zone = np.clip(cv2.blur((a < 0.5).astype(np.float32), (r, r)) * 4.0, 0.0, 1.0)
+        zone *= np.clip(seen * 25.0, 0.0, 1.0)        # no background nearby: B unknown, skip
+        if q < 1:
+            fg, bg = (cv2.resize(v, (w, h), interpolation=cv2.INTER_LINEAR) for v in (fg, bg))
+            zone = cv2.resize(zone, (w, h), interpolation=cv2.INTER_LINEAR)
+        d = fg - bg
+        dist2 = (d * d).sum(2)
+        share = np.clip(((x - bg) * d).sum(2) / (dist2 + 1e-5), 0.0, 1.0)   # 1 = subject colour
+        sure = np.clip((np.sqrt(dist2) - 0.12) / 0.15, 0.0, 1.0)             # F and B differ
+        # the pixel must really be a mix of F and B: skin next to dark hair, for
+        # example, lies off the hair-to-sky colour line and is left alone
+        off = x - bg - share[..., None] * d
+        fits = np.clip(1.0 - (np.sqrt((off * off).sum(2)) - 0.08) / 0.12, 0.0, 1.0)
+        out = np.minimum(alpha, 1.0 - zone * sure * fits * (1.0 - share))
+    return out
 
 
 def estimate_foreground(img: Image.Image, alpha: np.ndarray) -> Image.Image:
@@ -757,6 +813,47 @@ class Prepared:
 
 # ----------------------------------------------------------------- pipeline
 
+def subject_box(mask: np.ndarray, margin: float = 0.12) -> tuple | None:
+    """Bounding box of the subject as (l, t, r, b) fractions, with a margin
+    for loose hair; None when the mask is empty."""
+    ys, xs = np.nonzero(mask > 0.5)
+    if not len(xs):
+        return None
+    h, w = mask.shape
+    l, r, t, b = xs.min() / w, (xs.max() + 1) / w, ys.min() / h, (ys.max() + 1) / h
+    mx, my = max(margin * (r - l), 0.04), max(margin * (b - t), 0.04)
+    return max(0.0, l - mx), max(0.0, t - my), min(1.0, r + mx), min(1.0, b + my)
+
+
+def cut_out(main: Image.Image, segmenter: Segmenter, fine_model: Segmenter | None = None,
+            progress: Progress | None = None) -> np.ndarray:
+    """Full-resolution alpha of the subject.
+
+    Pass 1: the general model finds the subject in the whole photo.
+    Pass 2 (with fine_model): the matting model looks only at the subject's
+    bounding box, so its 1024-pixel input is spent on the subject instead of
+    the whole frame, and its soft hair alpha is fused into the outline."""
+    report = progress or (lambda pct, msg: None)
+    report(15, f"Segmenting ({segmenter.path.name})")
+    mask = segmenter.predict(main)
+    report(40, "Refining edges")
+    alpha = refine_mask(mask, main)
+    box = subject_box(mask) if fine_model is not None else None
+    if box is None:
+        return alpha
+    report(45, "Tracing fine hair")
+    l, t, r, b = _box(main.size, box)
+    crop = main.crop((l, t, r, b))
+    matting = fine_model.predict(crop)
+    mh, mw = mask.shape
+    ml, mt, mr, mb = _box((mw, mh), box)
+    general = cv2.resize(mask[mt:mb, ml:mr], (matting.shape[1], matting.shape[0]),
+                         interpolation=cv2.INTER_LINEAR)
+    report(70, "Refining edges")
+    alpha[t:b, l:r] = refine_mask(fuse_masks(general, matting), crop)
+    return alpha
+
+
 def prepare(main_path: str | Path, bg_path: str | Path | None, segmenter: Segmenter,
             progress: Progress | None = None,
             depth_model: DepthEstimator | None = None,
@@ -769,13 +866,9 @@ def prepare(main_path: str | Path, bg_path: str | Path | None, segmenter: Segmen
     report(5, "Loading images")
     main, exif, icc = load_image(main_path)
     bg = load_image(bg_path)[0] if bg_path else None
-    report(15, f"Segmenting ({segmenter.path.name})")
-    mask = segmenter.predict(main)
-    if fine_model is not None:
-        report(45, "Tracing fine hair")
-        mask = fuse_masks(mask, fine_model.predict(main))
-    report(70, "Refining edges")
-    alpha = refine_mask(mask, main)
+    alpha = cut_out(main, segmenter, fine_model, report)
+    report(78, "Opening hair gaps")
+    alpha = unmix_edges(main, alpha)
     report(82, "Cleaning edge colours")
     fg = estimate_foreground(main, alpha)
     if bg is None:

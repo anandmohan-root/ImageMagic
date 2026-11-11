@@ -4,7 +4,7 @@ ImageMagic is an offline Windows photo editor (the project folder and code are s
 
 - **New background is optional.** Pick one and the button reads **Replace background**. Leave it empty, or remove it with ✕ on its card, and the button reads **Edit photo**: the photo keeps its own background, and every tool still works on it, for example a portrait-mode blur. For this the app builds a "clean plate", a copy of the background with the subject filled in from its surroundings, so blurring leaves no halo of the person's colours.
 - **Output folder:** once you choose a folder, it stays the default for every photo until you close the app. Until then, it follows each photo's own folder.
-- **Cut-out: Standard or Fine hair.** Standard gives crisp edges and suits most photos. Fine hair runs a second model (BiRefNet matting) and takes its soft, see-through alpha only in a band around the outline, where both models agree, so loose hair blends better. It needs one more model pass per photo, and both models stay loaded (about 1 GB more RAM).
+- **One cut-out, tuned for hair.** Every photo gets the same three-step cut-out: a general model finds the subject, a matting model then looks only at the subject's bounding box and adds soft hair edges, and a colour step opens the gaps between hair strands so the new background shows through them. There is no quality switch to choose.
 
 Editor tools:
 
@@ -39,11 +39,13 @@ Nothing touches the disk until you press **Save**.
 
 1. Both images are loaded with their EXIF orientation applied and converted to RGB.
 2. A salient-object model finds the subject at its native 1024×1024 input size. The model is BiRefNet, with ISNet as the fallback.
-3. The mask is scaled up to full resolution and its edges are refined with a guided filter.
-4. Edge colours are cleaned automatically. Semi-transparent edge pixels, such as hair, still carry the old background's colour; blur-fusion foreground estimation (Forte & Pitié, 2021) recovers their true colour, so no old-background fringe shows against the new one.
-5. A new background is cover-fitted to the main image: scaled until it covers the frame, then centre-cropped. Without one, the photo's own clean plate is used. It is made by OpenCV inpainting under the subject only, so every other pixel stays exactly as photographed. The optional lens blur runs here, in linear light with a disc or hexagon kernel and highlight weighting. Focus falloff blends four blur strengths row by row.
-6. Your edits are applied: rotation, photo crop, edge shift and softness, subject tilt, size and position (one affine warp of the cut-out), colours, match lighting (statistics transfer in Lab colour space), shadow, light wrap, the result crop, then the look, vignette and grain. The preview uses a downscaled copy. Save runs the same code on the full-size images.
-7. The two images are alpha-blended and the result is saved.
+3. The BiRefNet matting model runs on the subject's bounding box only, so its 1024-pixel input is spent on the subject instead of the whole frame. Its soft alpha is used in a band around the outline, and only where it agrees with the general model about what the subject is. Without the matting model file, this step is skipped.
+4. The mask is scaled up to full resolution and its edges are refined with a guided filter.
+5. Hair gaps are opened. Near the outline, each pixel is compared with the local subject colour and the local background colour. Pixels that are plainly a mix leaning to the old background become transparent. The step only lowers alpha, needs the two colours to differ clearly, and leaves pixels that fit neither colour, such as skin beside dark hair.
+6. Edge colours are cleaned automatically. Semi-transparent edge pixels, such as hair, still carry the old background's colour; blur-fusion foreground estimation (Forte & Pitié, 2021) recovers their true colour, so no old-background fringe shows against the new one.
+7. A new background is cover-fitted to the main image: scaled until it covers the frame, then centre-cropped. Without one, the photo's own clean plate is used. It is made by OpenCV inpainting under the subject only, so every other pixel stays exactly as photographed. The optional lens blur runs here, in linear light with a disc or hexagon kernel and highlight weighting. Focus falloff blends four blur strengths row by row.
+8. Your edits are applied: rotation, photo crop, edge shift and softness, subject tilt, size and position (one affine warp of the cut-out), colours, match lighting (statistics transfer in Lab colour space), shadow, light wrap, the result crop, then the look, vignette and grain. The preview uses a downscaled copy. Save runs the same code on the full-size images.
+9. The two images are alpha-blended and the result is saved.
 
 Code: [bgreplacer/pipeline.py](bgreplacer/pipeline.py) (processing) and [bgreplacer/app.py](bgreplacer/app.py) (UI).
 
@@ -79,7 +81,7 @@ Download the models. This is the only step that uses the network, about 2.1 GB:
 .venv\Scripts\python scripts\fetch_models.py
 ```
 
-This puts four models in `models\` and writes their checksums to `models\SHA256SUMS.txt`: `BiRefNet-general-epoch_244.onnx` (MIT), `isnet-general-use.onnx` (Apache-2.0), `BiRefNet-matting-epoch_100.onnx` (MIT repository; optional, for Fine hair) and `depth-anything-v2-small.onnx` (Apache-2.0; optional, for Depth blur). The app hides Fine hair and disables Depth blur when their model is missing. See [models/MODEL_LICENSES.txt](models/MODEL_LICENSES.txt).
+This puts four models in `models\` and writes their checksums to `models\SHA256SUMS.txt`: `BiRefNet-general-epoch_244.onnx` (MIT), `isnet-general-use.onnx` (Apache-2.0), `BiRefNet-matting-epoch_100.onnx` (MIT repository; for fine hair edges) and `depth-anything-v2-small.onnx` (Apache-2.0; optional, for Depth blur). Without the matting model the cut-out skips its fine-hair step, and without the depth model Depth blur is disabled. See [models/MODEL_LICENSES.txt](models/MODEL_LICENSES.txt).
 
 ## Run
 

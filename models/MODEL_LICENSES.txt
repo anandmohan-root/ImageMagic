@@ -11,7 +11,7 @@ isnet-general-use.onnx  (fallback cut-out model)
   Licence: Apache License 2.0 (IS-Net / DIS, github.com/xuebinqin/DIS)
   Input:   1x3x1024x1024, x/255 - 0.5
 
-BiRefNet-matting-epoch_100.onnx  (optional: "Fine hair" edges)
+BiRefNet-matting-epoch_100.onnx  (fine hair edges; the cut-out skips this step if the file is missing)
   Source:  https://github.com/ZhengPeng7/BiRefNet/releases/download/v1/
   Licence: MIT repository licence, as above. No separate licence is stated for
            the matting weights or their training data (checked 2026-11-10).

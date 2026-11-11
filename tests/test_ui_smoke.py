@@ -31,6 +31,7 @@ def test_window_flow(jpegs, tiny_model):
     w.out_card.accept_path(str(out))
     assert w.run_btn.isEnabled()
 
+    w.models_dir = tiny_model                         # stand-in models only
     w.segmenter = pipeline.Segmenter.load_default(tiny_model)
     w.start()
     wait_idle(app, w)
@@ -117,6 +118,7 @@ def test_no_background_and_output_folder_rule(jpegs, tiny_model, tmp_path):
     assert w.out_card.path == str(out)
 
     # edit without a new background: portrait blur, save as _edited
+    w.models_dir = tiny_model                         # stand-in models only
     w.segmenter = pipeline.Segmenter.load_default(tiny_model)
     w.start()
     wait_idle(app, w)
@@ -138,6 +140,7 @@ def test_effect_tabs(jpegs, tiny_model):
     w.show()
     w.main_card.accept_path(str(main))
     w.bg_card.accept_path(str(bg))
+    w.models_dir = tiny_model                         # stand-in models only
     w.segmenter = pipeline.Segmenter.load_default(tiny_model)
     w.start()
     wait_idle(app, w)
@@ -162,7 +165,7 @@ def test_effect_tabs(jpegs, tiny_model):
     app.processEvents()
 
 
-def test_fine_hair_and_depth_blur(jpegs, tiny_model):
+def test_fine_cut_out_and_depth_blur(jpegs, tiny_model):
     main, bg, out = jpegs
     app = QApplication.instance() or QApplication([])
     w = MainWindow()
@@ -174,19 +177,12 @@ def test_fine_hair_and_depth_blur(jpegs, tiny_model):
     # own background + depth model: depth blur is available
     w.start()
     wait_idle(app, w)
-    assert w.segmenter.path.name == "BiRefNet-tiny-test.onnx" and w.fine_model is None
+    assert w.segmenter.path.name == "BiRefNet-tiny-test.onnx"
+    assert w.fine_model.path.name == "BiRefNet-matting-test.onnx"     # always used when present
     assert w.prep.depth is not None and w.blend_sliders["depth"][0].isEnabled()
     w.blend_sliders["depth"][0].setValue(60)
     w.render_now()
     assert w.edit.depth == 60
-    w.discard()
-
-    # Fine hair adds the matting model and cuts out again
-    w.set_fine(True)
-    w.start()
-    wait_idle(app, w)
-    assert w.fine_model.path.name == "BiRefNet-matting-test.onnx" and w.editing
-    assert w.segmenter.path.name == "BiRefNet-tiny-test.onnx"
     w.discard()
 
     # with a new background there is no depth: the slider is disabled
@@ -208,7 +204,6 @@ def test_start_new_resets_everything_but_the_output_folder(jpegs, tiny_model):
     w.main_card.accept_path(str(main))
     w.bg_card.accept_path(str(bg))
     w.out_card.accept_path(str(out))
-    w.set_fine(True)
     w.start()
     wait_idle(app, w)
     w.blend_sliders["blur"][0].setValue(50)
@@ -219,7 +214,7 @@ def test_start_new_resets_everything_but_the_output_folder(jpegs, tiny_model):
     w.next_btn.click()
     assert w.main_card.path == "" and w.bg_card.path == ""
     assert not w.bg_card.clear_btn.isVisibleTo(w)
-    assert not w.fine and w.cache == (None, None)
+    assert w.cache == (None, None)
     assert w.view.before is None and w.view.after is None
     assert not w.run_btn.isEnabled() and not w.next_btn.isVisibleTo(w)
     assert not w.reveal.isVisibleTo(w) and w.bar.value() == 0
