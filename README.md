@@ -29,6 +29,15 @@ Editor tools:
 - **Save** renders the result at full resolution and writes it. **Discard** writes nothing. Clicking the action button again with the same photos reopens the editor instantly, without cutting the subject out again.
 - **Start new:** appears after Save or Discard. It clears the photo, the background, the cut-out choice and all edits, so the app is as it was when it opened. Only the output folder is kept.
 
+**Make a collage** (on the start screen) puts 2 to 9 photos together in one picture:
+
+- **Photos:** use **Add photos**, or drop JPEGs on the preview. **Clear** removes them all.
+- **Layout:** each photo count has 3 or 4 layouts, such as equal grids or one big photo with smaller ones.
+- **On the preview:** drag a photo to choose which part shows in its cell, and scroll to zoom in (up to 4×). Drag a photo onto another cell to swap the two.
+- **Shape:** 1:1, 4:5, 3:2 or 16:9. **Spacing**, **Outer margin** and **Corner rounding** are sliders. **Background** offers preset colours, or **Custom…** to pick any colour.
+- **Look, Vignette and Grain** work as in the photo editor, over the whole collage.
+- **Saved size:** the long side is 3000 or 4000 px. The file is saved as `<first-cell-photo>_collage.jpg` at quality 95, and the usual `_1`, `_2`… rule means nothing is ever overwritten. No EXIF is copied, because the picture is made from several photos. The photos themselves are only read.
+
 Nothing touches the disk until you press **Save**.
 
 - **Nothing leaves the computer.** The model ships inside the app folder. The app has no network code and sends no telemetry, and a test fails if anything opens a socket during a run.
@@ -47,7 +56,7 @@ Nothing touches the disk until you press **Save**.
 8. Your edits are applied: rotation, photo crop, edge shift and softness, subject tilt, size and position (one affine warp of the cut-out), colours, match lighting (statistics transfer in Lab colour space), shadow, light wrap, the result crop, then the look, vignette and grain. The preview uses a downscaled copy. Save runs the same code on the full-size images.
 9. The two images are alpha-blended and the result is saved.
 
-Code: [bgreplacer/pipeline.py](bgreplacer/pipeline.py) (processing) and [bgreplacer/app.py](bgreplacer/app.py) (UI).
+Code: [bgreplacer/pipeline.py](bgreplacer/pipeline.py) (processing), [bgreplacer/collage.py](bgreplacer/collage.py) (collage layouts and rendering) and [bgreplacer/app.py](bgreplacer/app.py) (UI).
 
 ## Setup (once)
 

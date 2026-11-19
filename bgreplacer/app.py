@@ -10,15 +10,15 @@ from PIL import Image, ImageOps
 from PySide6.QtCore import (QByteArray, QEasingCurve, QObject, QPointF, QPropertyAnimation,
                             QRectF, QSize, Qt, QThread, QTimer, QUrl, Property, Signal)
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication,
-                           QImage, QPainter, QPainterPath, QPen, QPixmap)
+                           QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QFileDialog, QFrame,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QColorDialog, QFileDialog, QFrame,
                                QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel,
                                QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
                                QSlider,
                                QStackedWidget, QVBoxLayout, QWidget)
 
-from . import pipeline
+from . import collage, pipeline
 
 APP_NAME = "ImageMagic"
 START_TEXT = "Pick a photo to start. A new background is optional."
@@ -138,6 +138,8 @@ ICONS = {
               '<path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>',
     "eye": '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/>'
            '<circle cx="12" cy="12" r="3"/>',
+    "grid": '<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/>'
+            '<rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>',
     "trash": '<path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/>'
              '<path d="M9 7V4h6v3"/>',
 }
@@ -721,6 +723,157 @@ class Canvas(QWidget):
         self.dropped.emit(e.mimeData().urls()[0].toLocalFile())
 
 
+class CollageView(Canvas):
+    """Collage preview. Drag a photo to move it inside its cell, scroll to zoom
+    it, or drag it onto another cell to swap the two. Accepts dropped JPEGs."""
+    panned = Signal(int, float, float)     # cell, dx, dy in picture pixels
+    zoomed = Signal(int, float)            # cell, wheel steps (+ = closer)
+    swapped = Signal(int, int)
+    files_dropped = Signal(list)
+
+    def __init__(self, colors: dict):
+        super().__init__(colors)
+        self.rects: list = []              # cell boxes in picture pixels
+        self.pic_w = 1
+        self._from = self._hover = None
+
+    def show_collage(self, pm: QPixmap | None, rects: list, pic_w: int):
+        self.rects, self.pic_w = rects, max(1, pic_w)
+        self.set_before(pm)
+
+    def _cell(self, pos: QPointF) -> int | None:
+        if self.before is None:
+            return None
+        r = self._fit(self.before)
+        k = self.pic_w / r.width()
+        x, y = (pos.x() - r.left()) * k, (pos.y() - r.top()) * k
+        return next((i for i, (x0, y0, x1, y1) in enumerate(self.rects)
+                     if x0 <= x < x1 and y0 <= y < y1), None)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        cell = self._hover
+        if self.before is None or self.busy or cell is None:
+            return
+        r = self._fit(self.before)
+        k = r.width() / self.pic_w
+        x0, y0, x1, y1 = self.rects[cell]
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        swap = self._from is not None and cell != self._from
+        p.setPen(QPen(QColor(self.c["accent"] if swap else "white"), 3 if swap else 2))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(r.left() + x0 * k, r.top() + y0 * k,
+                                 (x1 - x0) * k, (y1 - y0) * k).adjusted(1, 1, -1, -1), 6, 6)
+        if swap:
+            self._chip(p, "Drop to swap", QPointF(r.left() + x0 * k + 10, r.top() + y0 * k + 10),
+                       left=True)
+
+    def _empty(self, p: QPainter):
+        c = self.c
+        center = QRectF(self.rect()).center()
+        p.drawPixmap(QPointF(center.x() - 20, center.y() - 56), icon("grid", c["muted"], 40))
+        f = QFont(self.font())
+        f.setPointSizeF(13)
+        f.setWeight(QFont.DemiBold)
+        p.setFont(f)
+        p.setPen(QColor(c["text"]))
+        p.drawText(QRectF(0, center.y() - 4, self.width(), 24), Qt.AlignCenter,
+                   f"Drop {collage.MIN_PHOTOS} to {collage.MAX_PHOTOS} photos here")
+        f.setPointSizeF(10)
+        f.setWeight(QFont.Normal)
+        p.setFont(f)
+        p.setPen(QColor(c["muted"]))
+        p.drawText(QRectF(0, center.y() + 22, self.width(), 20), Qt.AlignCenter,
+                   "or click Add photos on the left.")
+
+    def mousePressEvent(self, e):
+        if self.busy or e.button() != Qt.LeftButton:
+            return
+        self._from, self._last = self._cell(e.position()), e.position()
+        if self._from is not None:
+            self.setCursor(Qt.ClosedHandCursor)
+
+    def mouseMoveEvent(self, e):
+        pos = e.position()
+        cell = None if self.busy else self._cell(pos)
+        if self._from is not None and e.buttons() & Qt.LeftButton:
+            if cell == self._from:                 # inside its own cell: move the photo
+                d = pos - self._last
+                k = self.pic_w / self._fit(self.before).width()
+                self.panned.emit(self._from, d.x() * k, d.y() * k)
+            self._last = pos
+        else:
+            self.setCursor(Qt.OpenHandCursor if cell is not None else Qt.ArrowCursor)
+        if cell != self._hover:
+            self._hover = cell
+            self.update()
+
+    def mouseReleaseEvent(self, e):
+        target, start = self._cell(e.position()), self._from
+        self._from = None
+        if start is not None and target is not None and target != start:
+            self.swapped.emit(start, target)
+        self.setCursor(Qt.OpenHandCursor if target is not None else Qt.ArrowCursor)
+        self.update()
+
+    def leaveEvent(self, e):
+        self._hover = None
+        self.update()
+
+    def wheelEvent(self, e):
+        cell = None if self.busy else self._cell(e.position())
+        if cell is not None:
+            self.zoomed.emit(cell, e.angleDelta().y() / 120)
+
+    def _jpegs(self, mime) -> list:
+        return [u.toLocalFile() for u in mime.urls()
+                if u.isLocalFile() and Path(u.toLocalFile()).suffix.lower() in JPEG_EXT]
+
+    def dragEnterEvent(self, e):
+        if self._jpegs(e.mimeData()) and not self.busy:
+            e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        self.files_dropped.emit(self._jpegs(e.mimeData()))
+
+
+def layout_icon(layout: str, color: str, dpr: float = 2.0) -> QPixmap:
+    """Small drawing of a collage layout, for its chip."""
+    w, h = 40, 28
+    pm = QPixmap(int(w * dpr), int(h * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(color))
+    for l, t, r, b in collage.cells(layout):
+        p.drawRoundedRect(QRectF(l * w + 1, t * h + 1, (r - l) * w - 2, (b - t) * h - 2), 2, 2)
+    p.end()
+    return pm
+
+
+def swatch(rgb: tuple, border: str, dpr: float = 2.0) -> QPixmap:
+    pm = QPixmap(int(16 * dpr), int(16 * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(QPen(QColor(border), 1))
+    p.setBrush(QColor(*rgb))
+    p.drawEllipse(QRectF(1, 1, 14, 14))
+    p.end()
+    return pm
+
+
+COLLAGE_PREVIEW = 1200            # long side of the live preview and its photo copies
+COLLAGE_SLIDERS = [("spacing", "SPACING"), ("margin", "OUTER MARGIN"), ("corners", "CORNER ROUNDING")]
+COLLAGE_BGS = [("White", (255, 255, 255)), ("Cream", (245, 239, 226)), ("Grey", (128, 128, 128)),
+               ("Black", (0, 0, 0)), ("Navy", (28, 37, 65))]
+COLLAGE_SIZES = [("3000 px", 3000), ("4000 px", 4000)]
+
+
 # ------------------------------------------------------------------ window
 
 TOOLS = [("adjust", "Adjust"), ("colors", "Colors"), ("blend", "Blend"), ("blur", "Blur"),
@@ -794,6 +947,11 @@ class MainWindow(QWidget):
         self.aspect = None
         self.editing = False
         self.render_timer = QTimer(self, singleShot=True, interval=0, timeout=self.render_now)
+        self.photos = []                  # collage: (path, preview copy) per photo
+        self.collage = collage.Collage(collage.LAYOUTS[2][0])
+        self.collage_px = 3000            # long side of the saved collage
+        self.collage_dirty = False        # photos added and not saved since
+        self.collage_timer = QTimer(self, singleShot=True, interval=0, timeout=self.show_collage)
 
         # header
         title = QLabel(APP_NAME, objectName="title")
@@ -809,6 +967,7 @@ class MainWindow(QWidget):
         self.pages = QStackedWidget()
         self.pages.addWidget(self._setup_page())
         self.pages.addWidget(self._edit_page())
+        self.pages.addWidget(self._collage_page())
 
         self.bar = QProgressBar(textVisible=False)
         self.bar.setRange(0, 1000)
@@ -842,12 +1001,20 @@ class MainWindow(QWidget):
         self.view.moved.connect(self.on_moved)
         self.view.wheeled.connect(self.on_wheel)
         self.view.crop_changed.connect(self.on_crop)
+        self.collage_view = CollageView(c)
+        self.collage_view.files_dropped.connect(self.add_photos)
+        self.collage_view.panned.connect(self.on_cell_pan)
+        self.collage_view.zoomed.connect(self.on_cell_zoom)
+        self.collage_view.swapped.connect(self.on_cell_swap)
+        self.views = QStackedWidget()
+        self.views.addWidget(self.view)
+        self.views.addWidget(self.collage_view)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(28, 28, 28, 28)
         root.setSpacing(28)
         root.addWidget(left_w)
-        root.addWidget(self.view, 1)
+        root.addWidget(self.views, 1)
         self.refresh()
 
     # ---------------------------------------------------------- page builders
@@ -880,6 +1047,10 @@ class MainWindow(QWidget):
             lay.addWidget(card)
             lay.addSpacing(4)
         lay.addStretch()
+        self.collage_btn = tool_button("Make a collage", "grid", self.c["accent"])
+        self.collage_btn.setToolTip("Put 2 to 9 photos together in one picture.")
+        self.collage_btn.clicked.connect(self.enter_collage)
+        lay.addWidget(self.collage_btn)
         self.next_btn = tool_button("Start new", "reset", self.c["accent"])
         self.next_btn.setToolTip("Clear the photo, background and settings and start again. "
                                  "The output folder stays.")
@@ -1107,6 +1278,113 @@ class MainWindow(QWidget):
         self.edit_page = page
         return page
 
+    def _chips(self, lay, options, cols, slot, checked) -> QButtonGroup:
+        """Grid of checkable chips; options are (text, value, icon or None)."""
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        group = QButtonGroup(self)
+        for i, (text, value, ic) in enumerate(options):
+            chip = QPushButton(text, objectName="chip", checkable=True)
+            chip.setCursor(Qt.PointingHandCursor)
+            chip.setProperty("value", value)
+            chip.setChecked(value == checked)
+            if ic is not None:
+                chip.setIcon(ic)
+            group.addButton(chip)
+            grid.addWidget(chip, i // cols, i % cols)
+        group.buttonClicked.connect(lambda b: slot(b.property("value")))
+        lay.addLayout(grid)
+        return group
+
+    def _collage_page(self) -> QWidget:
+        c, a = self.c, self.c["accent"]
+        d = self.collage
+        page = QWidget(objectName="page")
+        pl = QVBoxLayout(page)
+        pl.setContentsMargins(0, 0, 8, 0)
+        pl.setSpacing(8)
+        pl.addWidget(section("PHOTOS"))
+        self.photo_count = QLabel(objectName="hint", wordWrap=True)
+        pl.addWidget(self.photo_count)
+        row = QHBoxLayout()
+        add, clear = tool_button("Add photos", "photo", a), tool_button("Clear", "trash", c["danger"])
+        add.clicked.connect(self.pick_photos)
+        clear.clicked.connect(self.clear_photos)
+        row.addWidget(add)
+        row.addWidget(clear)
+        pl.addLayout(row)
+        pl.addWidget(QLabel("On the preview: drag a photo to move it in its cell, scroll to "
+                            "zoom, or drag it onto another cell to swap the two.",
+                            objectName="hint", wordWrap=True))
+        pl.addSpacing(6)
+        pl.addWidget(section("LAYOUT"))
+        self.layout_grid = QGridLayout()
+        self.layout_grid.setSpacing(8)
+        self.layout_group = QButtonGroup(self)
+        self.layout_group.buttonClicked.connect(
+            lambda b: self.set_collage(layout=b.property("value"), views=[]))
+        pl.addLayout(self.layout_grid)
+        pl.addSpacing(6)
+        pl.addWidget(section("SHAPE"))
+        shapes = [(n, v, None) for n, v in ASPECTS if isinstance(v, float)]
+        self.shape_group = self._chips(pl, shapes, 4, lambda v: self.set_collage(aspect=v), d.aspect)
+        pl.addSpacing(6)
+        self.collage_sliders = {
+            key: self._slider(pl, label, 0, 100, getattr(d, key),
+                              lambda v, k=key: self.set_collage(**{k: v}))
+            for key, label in COLLAGE_SLIDERS}
+        pl.addSpacing(6)
+        pl.addWidget(section("BACKGROUND"))
+        bgs = [(n, n, QIcon(swatch(rgb, c["border"]))) for n, rgb in COLLAGE_BGS]
+        self.bg_group = self._chips(pl, bgs + [("Custom…", "custom", None)], 3,
+                                    self.set_collage_bg, "White")
+        pl.addSpacing(6)
+        pl.addWidget(section("LOOK"))
+        looks = [(t, v, None) for v, t in FX_CHIPS["looks"][3]]
+        self.collage_look = self._chips(pl, looks, 3, lambda v: self.set_collage(look=v), d.look)
+        for key, label in (("vignette", "VIGNETTE"), ("grain", "GRAIN")):
+            self.collage_sliders[key] = self._slider(
+                pl, label, 0, 100, getattr(d, key), lambda v, k=key: self.set_collage(**{k: v}))
+        pl.addSpacing(6)
+        pl.addWidget(section("SAVED SIZE"))
+        self.size_group = self._chips(pl, [(t, v, None) for t, v in COLLAGE_SIZES], 2,
+                                      self.set_collage_px, self.collage_px)
+        self.collage_out = QLabel(objectName="hint", wordWrap=True)
+        pl.addWidget(self.collage_out)
+        change = QPushButton("Change folder", objectName="link")
+        change.setCursor(Qt.PointingHandCursor)
+        change.clicked.connect(self.out_card.open_picker)
+        pl.addWidget(change, 0, Qt.AlignLeft)
+        pl.addStretch()
+        area = QScrollArea()
+        area.setWidget(page)
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        self.collage_close = QPushButton("  Discard", objectName="secondary")
+        self.collage_close.setIcon(icon("trash", c["danger"], 18))
+        self.collage_close.setIconSize(QSize(18, 18))
+        self.collage_close.setCursor(Qt.PointingHandCursor)
+        self.collage_close.clicked.connect(self.close_collage)
+        self.collage_save = QPushButton("  Save", objectName="primary")
+        self.collage_save.setIcon(icon("drop", "#FFFFFF", 20))
+        self.collage_save.setIconSize(QSize(20, 20))
+        self.collage_save.setCursor(Qt.PointingHandCursor)
+        self.collage_save.clicked.connect(self.save_collage)
+        actions = QHBoxLayout()
+        actions.setSpacing(10)
+        actions.addWidget(self.collage_close, 1)
+        actions.addWidget(self.collage_save, 1)
+        outer = QWidget()
+        lay = QVBoxLayout(outer)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+        lay.addWidget(area, 1)
+        lay.addLayout(actions)
+        self.collage_page = area
+        return outer
+
     def _slider(self, lay, label, lo, hi, val, slot):
         head = QHBoxLayout()
         head.addWidget(section(label))
@@ -1147,6 +1425,18 @@ class MainWindow(QWidget):
         for key, (slider, label) in self.blend_sliders.items():
             v = slider.value()
             label.setText(f"{v:+d}" if (key in SIGNED and v) else str(v))
+        n = len(self.photos)
+        self.collage_save.setEnabled(n >= collage.MIN_PHOTOS and bool(self.out_card.path)
+                                     and not busy)
+        self.collage_page.setEnabled(not busy)
+        self.collage_close.setText("  Discard" if self.collage_dirty else "  Close")
+        self.photo_count.setText(
+            f"{n} of {collage.MAX_PHOTOS} photos." + (" Add at least one more." if n == 1 else ""))
+        fm = QFontMetrics(self.collage_out.font())     # a long path can't wrap: elide it
+        self.collage_out.setText(fm.elidedText(f"Saves to {self.out_card.path}", Qt.ElideMiddle, 320)
+                                 if self.out_card.path else "Choose a folder to save to.")
+        for slider, label in self.collage_sliders.values():
+            label.setText(str(slider.value()))
 
     def on_main(self, path: str):
         try:
@@ -1212,7 +1502,7 @@ class MainWindow(QWidget):
         self.reveal.hide()
         self.bar.setValue(0)
         self.set_status(busy_text)
-        self.view.set_busy(True, busy_text)
+        self.views.currentWidget().set_busy(True, busy_text)
         self.thread = QThread()
         self.worker = Worker(fn)
         self.worker.moveToThread(self.thread)
@@ -1230,10 +1520,10 @@ class MainWindow(QWidget):
         self.animate_bar(pct)
         self.set_status(msg)
         friendly = next((v for k, v in self.FRIENDLY.items() if msg.startswith(k)), msg)
-        self.view.set_busy(True, friendly)
+        self.views.currentWidget().set_busy(True, friendly)
 
     def on_failed(self, msg: str):
-        self.view.set_busy(False)
+        self.views.currentWidget().set_busy(False)
         self.bar.setValue(0)
         self.set_status("Something went wrong.", "error")
         QMessageBox.critical(self, "Error", msg)
@@ -1493,11 +1783,206 @@ class MainWindow(QWidget):
         if self.last_output:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(self.last_output).parent)))
 
+    # ---------------------------------------------------------- collage
+    def enter_collage(self):
+        if self.busy():
+            return
+        self.reveal.hide()
+        self.next_btn.hide()
+        self.bar.setValue(0)
+        self.pages.setCurrentIndex(2)
+        self.views.setCurrentIndex(1)
+        self.fill_layouts()
+        self.show_collage()
+
+    def pick_photos(self):
+        start = str(Path(self.photos[-1][0]).parent) if self.photos else ""
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add photos", start, JPEG_FILTER)
+        if paths:
+            self.add_photos(paths)
+
+    def add_photos(self, paths: list):
+        if self.busy():
+            return
+        have = {p for p, _ in self.photos}
+        new = list(dict.fromkeys(p for p in paths
+                                 if Path(p).suffix.lower() in JPEG_EXT and p not in have))
+        room = collage.MAX_PHOTOS - len(self.photos)
+        if len(new) > room:
+            QMessageBox.information(self, "Collage is full",
+                                    f"A collage holds up to {collage.MAX_PHOTOS} photos. "
+                                    + (f"Only the first {room} were added." if room else ""))
+            new = new[:room]
+        if not new:
+            return
+
+        def job(progress):
+            out = []
+            for i, path in enumerate(new):
+                progress(100 * i // len(new), "Loading images")
+                img = pipeline.load_image(path)[0]     # read-only
+                img.thumbnail((COLLAGE_PREVIEW, COLLAGE_PREVIEW), Image.Resampling.LANCZOS)
+                out.append((path, img))
+            return out
+
+        self.run_job(job, self.on_photos, "Opening photos…")
+
+    def on_photos(self, loaded: list):
+        self.photos += loaded
+        n = len(self.photos)
+        if not self.out_card.chosen:           # same rule as the main photo
+            self.out_card.set_path(str(Path(self.photos[0][0]).parent))
+        if n >= collage.MIN_PHOTOS:
+            self.collage = replace(self.collage, layout=collage.LAYOUTS[n][0], order=[], views=[])
+        self.collage_dirty = True
+        self.collage_view.set_busy(False)
+        self.animate_bar(100)
+        self.fill_layouts()
+        self.show_collage()
+
+    def clear_photos(self):
+        if self.busy():
+            return
+        self.photos = []
+        self.collage_dirty = False
+        self.fill_layouts()
+        self.show_collage()
+
+    def fill_layouts(self):
+        for b in self.layout_group.buttons():
+            self.layout_group.removeButton(b)
+            b.deleteLater()
+        for i, layout in enumerate(collage.LAYOUTS.get(len(self.photos), [])):
+            chip = QPushButton(objectName="chip", checkable=True)
+            chip.setCursor(Qt.PointingHandCursor)
+            chip.setProperty("value", layout)
+            ic = QIcon(layout_icon(layout, self.c["muted"]))
+            ic.addPixmap(layout_icon(layout, "#FFFFFF"), QIcon.Normal, QIcon.On)
+            chip.setIcon(ic)
+            chip.setIconSize(QSize(40, 28))
+            chip.setMinimumHeight(44)
+            chip.setChecked(layout == self.collage.layout)
+            self.layout_group.addButton(chip)
+            self.layout_grid.addWidget(chip, i // 3, i % 3)
+
+    def set_collage(self, **changes):
+        self.collage = replace(self.collage, **changes)
+        if len(self.photos) >= collage.MIN_PHOTOS:
+            self.collage_dirty = True
+        self.collage_timer.start()                # coalesce rapid changes
+        self.refresh()
+
+    def set_collage_bg(self, name: str):
+        rgb = dict(COLLAGE_BGS).get(name)
+        if rgb is None:                           # Custom…
+            q = QColorDialog.getColor(QColor(*self.collage.bg), self, "Background colour")
+            if not q.isValid():
+                return
+            rgb = (q.red(), q.green(), q.blue())
+        self.set_collage(bg=rgb)
+
+    def set_collage_px(self, px: int):
+        self.collage_px = px
+        self.show_collage()
+
+    def show_collage(self):
+        if len(self.photos) < collage.MIN_PHOTOS:
+            self.collage_view.show_collage(None, [], 1)
+            self.set_status(f"Add {collage.MIN_PHOTOS} to {collage.MAX_PHOTOS} photos.")
+        else:
+            pic = collage.render([img for _, img in self.photos], self.collage, COLLAGE_PREVIEW)
+            self.collage_view.show_collage(pil_to_pixmap(pic),
+                                           collage.cell_rects(self.collage, pic.size), pic.width)
+            w, h = collage.canvas_size(self.collage.aspect, self.collage_px)
+            if self.collage_dirty:
+                self.set_status(f"Collage {w} × {h} px. Nothing is saved until you press Save.")
+        self.refresh()
+
+    def on_cell_pan(self, cell: int, dx: float, dy: float):
+        x0, y0, x1, y1 = self.collage_view.rects[cell]
+        photo = self.photos[self.collage.order[cell]][1]
+        views = list(self.collage.views)
+        views[cell] = collage.pan(photo.size, (x1 - x0, y1 - y0), views[cell], dx, dy)
+        self.set_collage(views=views)
+
+    def on_cell_zoom(self, cell: int, steps: float):
+        views = list(self.collage.views)
+        zoom, px, py = views[cell]
+        views[cell] = (min(4.0, max(1.0, zoom * 1.1 ** steps)), px, py)
+        self.set_collage(views=views)
+
+    def on_cell_swap(self, a: int, b: int):
+        order, views = list(self.collage.order), list(self.collage.views)
+        order[a], order[b] = order[b], order[a]
+        views[a] = views[b] = (1.0, 0.5, 0.5)
+        self.set_collage(order=order, views=views)
+
+    def save_collage(self):
+        if self.busy() or len(self.photos) < collage.MIN_PHOTOS or not self.out_card.path:
+            return
+        c, px, out_dir = self.collage, self.collage_px, self.out_card.path
+        paths = [p for p, _ in self.photos]
+
+        def job(progress):
+            full = []
+            for i, path in enumerate(paths):
+                progress(5 + 60 * i // len(paths), "Loading images")
+                full.append(pipeline.load_image(path)[0])          # read-only
+            progress(70, "Rendering full size")
+            img = collage.render(full, c, px)
+            progress(90, "Saving")
+            # named after the photo in the first cell; never overwrites anything
+            return str(pipeline.save_jpeg(img, paths[c.order[0]], out_dir, suffix="_collage"))
+
+        self.run_job(job, self.on_collage_saved, "Saving…")
+
+    def on_collage_saved(self, out: str):
+        self.last_output = out
+        self.collage_dirty = False
+        self.collage_view.set_busy(False)
+        self.animate_bar(100)
+        self.set_status(f"✓  Saved as {Path(out).name}", "ok")
+        self.reveal.show()
+        self.refresh()
+
+    def close_collage(self):
+        if self.busy():
+            return
+        if self.collage_dirty and QMessageBox.question(
+                self, "Discard this collage?",
+                "The collage has not been saved. Discard it?") != QMessageBox.Yes:
+            return
+        self.photos = []
+        self.collage_dirty = False
+        self.collage = collage.Collage(collage.LAYOUTS[2][0])
+        self.collage_px = 3000
+        d = self.collage
+        for key, (slider, _) in self.collage_sliders.items():
+            slider.blockSignals(True)
+            slider.setValue(getattr(d, key))
+            slider.blockSignals(False)
+        for group, value in ((self.shape_group, d.aspect), (self.bg_group, "White"),
+                             (self.collage_look, d.look), (self.size_group, self.collage_px)):
+            for chip in group.buttons():
+                chip.setChecked(chip.property("value") == value)
+        self.collage_view.show_collage(None, [], 1)
+        self.pages.setCurrentIndex(0)
+        self.views.setCurrentIndex(0)
+        self.bar.setValue(0)
+        self.set_status(self.ready_text() if self.ready() else START_TEXT)
+        self.refresh()
+
     def closeEvent(self, e):
         if self.busy():
             QMessageBox.information(self, "Please wait", "Still working. Try again in a moment.")
             e.ignore()
             return
+        if self.collage_dirty:
+            answer = QMessageBox.question(self, "Discard this collage?",
+                                          "The collage has not been saved. Close anyway?")
+            if answer != QMessageBox.Yes:
+                e.ignore()
+                return
         if self.editing:
             answer = QMessageBox.question(self, "Discard this edit?",
                                           "The edited picture has not been saved. Close anyway?")
