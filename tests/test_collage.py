@@ -85,7 +85,7 @@ def test_look_applies_to_the_whole_collage():
 
 
 def test_window_collage_flow(tmp_path):
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QLineEdit
     from bgreplacer.app import MainWindow
     from tests.test_ui_smoke import wait_idle
 
@@ -123,6 +123,13 @@ def test_window_collage_flow(tmp_path):
     app.processEvents()
     assert w.collage.layout == C.LAYOUTS[3][1] and w.collage.order == [2, 1, 0]
     assert w.collage.views[1][0] > 1.0 and w.collage.corners == 30
+    w.title_edit.setText("Holiday")
+    w.title_pos_group.buttons()[0].click()             # Top
+    rows = w.caption_host.findChildren(QLineEdit)
+    assert len(rows) == 3
+    rows[2].setText("Garden")
+    assert w.collage.title == "Holiday" and w.collage.title_pos == "top"
+    assert w.collage.captions == ["", "", "Garden"]
     assert list(out.iterdir()) == []                   # nothing written before Save
 
     w.save_collage()
@@ -140,4 +147,43 @@ def test_window_collage_flow(tmp_path):
     w.close_collage()                                  # saved, so no question
     assert w.pages.currentIndex() == 0 and w.views.currentIndex() == 0 and w.photos == []
     assert w.collage_sliders["corners"][0].value() == 0
+    assert w.title_edit.text() == "" and w.collage.title == "" and w.collage.captions == []
     w.close()
+
+
+def test_title_band_takes_room_from_the_photos_and_draws_text():
+    photos = [Image.new("RGB", (100, 100), RED)] * 2
+    plain = C.Collage("AB", spacing=0, margin=0, bg=(255, 255, 255))
+    assert C.cell_rects(plain, (800, 800))[0] == (0, 0, 400, 800)
+    for pos in ("top", "bottom"):
+        c = C.Collage("AB", spacing=0, margin=0, bg=(255, 255, 255), title="Hello", title_pos=pos)
+        band = C.title_band(c, (800, 800))
+        x0, y0, x1, y1 = C.cell_rects(c, (800, 800))[0]
+        assert band > 0 and y1 - y0 == 800 - band and (y0 == band) == (pos == "top")
+        out = np.asarray(C.render(photos, c, 800))
+        strip = out[:band] if pos == "top" else out[800 - band:]
+        assert strip.min() < 60                              # dark text on the light band
+    over = C.Collage("AB", spacing=0, margin=0, title="Hello", title_pos="over")
+    assert C.title_band(over, (800, 800)) == 0
+    assert C.title_band(C.Collage("AB", title="   "), (800, 800)) == 0   # blank: no band
+    out = np.asarray(C.render(photos, over, 800))
+    assert (out[350:450].min(axis=2) > 230).any()            # white title over red photos
+
+
+def test_captions_follow_their_photo_and_long_text_shrinks():
+    photos = [Image.new("RGB", (100, 100), RED), Image.new("RGB", (100, 100), BLUE)]
+    c = C.Collage("AB", spacing=0, margin=0, captions=["Beach", ""])
+    out = np.asarray(C.render(photos, c, 800))
+    assert (out[700:, :400].min(axis=2) > 230).any()         # caption text under photo 1
+    assert not (out[700:, 400:].min(axis=2) > 230).any()     # photo 2 has none
+    swapped = np.asarray(C.render(photos, C.Collage("AB", spacing=0, margin=0, order=[1, 0],
+                                                    captions=["Beach", ""]), 800))
+    assert (swapped[700:, 400:].min(axis=2) > 230).any()     # moved with its photo
+    long = C.Collage("AB", spacing=0, margin=0, captions=["W" * 40, ""], text_size=100)
+    out = np.asarray(C.render(photos, long, 800))
+    assert not (out[700:, 0:2].min(axis=2) > 230).any() and not (out[700:, 398:400].min(axis=2) > 230).any()
+
+
+def test_missing_font_falls_back():
+    assert C.font("No such font", 20) is not None
+    assert C.font("Georgia", 20).size == 20

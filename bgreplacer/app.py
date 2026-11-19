@@ -14,6 +14,7 @@ from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QGuiAp
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QColorDialog, QFileDialog, QFrame,
                                QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel,
+                               QLineEdit,
                                QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
                                QSlider,
                                QStackedWidget, QVBoxLayout, QWidget)
@@ -101,6 +102,9 @@ def stylesheet(c: dict) -> str:
         min-height: 24px; }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
     QLabel#hint {{ color: {c['muted']}; font-size: 12px; }}
+    QLineEdit {{ border: 1px solid {c['border']}; border-radius: 10px; min-height: 36px;
+        padding: 0 10px; font-size: 13px; background: {c['surface']}; }}
+    QLineEdit:focus {{ border-color: {c['accent']}; }}
     QLabel#value {{ color: {c['text']}; font-size: 12px; font-weight: 600; }}
     QSlider:horizontal {{ min-height: 26px; }}
     QSlider::sub-page:horizontal:disabled {{ background: {c['border']}; }}
@@ -872,6 +876,8 @@ COLLAGE_SLIDERS = [("spacing", "SPACING"), ("margin", "OUTER MARGIN"), ("corners
 COLLAGE_BGS = [("White", (255, 255, 255)), ("Cream", (245, 239, 226)), ("Grey", (128, 128, 128)),
                ("Black", (0, 0, 0)), ("Navy", (28, 37, 65))]
 COLLAGE_SIZES = [("3000 px", 3000), ("4000 px", 4000)]
+TITLE_POSITIONS = [("Top", "top"), ("Bottom", "bottom"), ("Over photos", "over")]
+TITLE_COLORS = [("Auto", "auto"), ("Black", "black"), ("White", "white"), ("Gold", "gold")]
 
 
 # ------------------------------------------------------------------ window
@@ -1338,6 +1344,36 @@ class MainWindow(QWidget):
         bgs = [(n, n, QIcon(swatch(rgb, c["border"]))) for n, rgb in COLLAGE_BGS]
         self.bg_group = self._chips(pl, bgs + [("Custom…", "custom", None)], 3,
                                     self.set_collage_bg, "White")
+        pl.addSpacing(6)
+        pl.addWidget(section("TITLE"))
+        self.title_edit = QLineEdit(placeholderText="Add a title (optional)", maxLength=80)
+        self.title_edit.textChanged.connect(lambda t: self.set_collage(title=t))
+        pl.addWidget(self.title_edit)
+        self.title_pos_group = self._chips(pl, [(t, v, None) for t, v in TITLE_POSITIONS], 3,
+                                           lambda v: self.set_collage(title_pos=v), d.title_pos)
+        pl.addWidget(section("TITLE COLOUR"))
+        colors = [(t, v, QIcon(swatch(collage.TEXT_COLORS[v], c["border"]))
+                   if collage.TEXT_COLORS[v] else None) for t, v in TITLE_COLORS]
+        self.title_color_group = self._chips(pl, colors, 4,
+                                             lambda v: self.set_collage(text_color=v), d.text_color)
+        pl.addSpacing(6)
+        pl.addWidget(section("PHOTO CAPTIONS"))
+        pl.addWidget(QLabel("Shown at the bottom of each photo. Leave empty for none.",
+                            objectName="hint", wordWrap=True))
+        self.caption_host = QWidget(objectName="page")
+        QVBoxLayout(self.caption_host).setContentsMargins(0, 0, 0, 0)
+        self.caption_host.layout().setSpacing(6)
+        pl.addWidget(self.caption_host)
+        pl.addSpacing(6)
+        pl.addWidget(section("FONT"))
+        self.font_group = self._chips(pl, [(n, n, None) for n in collage.FONTS], 2,
+                                      lambda v: self.set_collage(font=v), d.font)
+        for chip in self.font_group.buttons():         # each chip shows its own font
+            f = QFont(chip.property("value"))
+            f.setPointSizeF(10)
+            chip.setFont(f)
+        self.collage_sliders["text_size"] = self._slider(
+            pl, "TEXT SIZE", 0, 100, d.text_size, lambda v: self.set_collage(text_size=v))
         pl.addSpacing(6)
         pl.addWidget(section("LOOK"))
         looks = [(t, v, None) for v, t in FX_CHIPS["looks"][3]]
@@ -1838,6 +1874,7 @@ class MainWindow(QWidget):
         self.collage_view.set_busy(False)
         self.animate_bar(100)
         self.fill_layouts()
+        self.fill_captions()
         self.show_collage()
 
     def clear_photos(self):
@@ -1845,7 +1882,9 @@ class MainWindow(QWidget):
             return
         self.photos = []
         self.collage_dirty = False
+        self.collage = replace(self.collage, captions=[])
         self.fill_layouts()
+        self.fill_captions()
         self.show_collage()
 
     def fill_layouts(self):
@@ -1864,6 +1903,31 @@ class MainWindow(QWidget):
             chip.setChecked(layout == self.collage.layout)
             self.layout_group.addButton(chip)
             self.layout_grid.addWidget(chip, i // 3, i % 3)
+
+    def fill_captions(self):
+        """One caption box per photo, in the order the photos were added."""
+        host = self.caption_host
+        for w in host.findChildren(QWidget, options=Qt.FindDirectChildrenOnly):
+            w.deleteLater()
+        caps = self.collage.captions
+        for i, (_, img) in enumerate(self.photos):
+            row = QWidget(host, objectName="page")
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setSpacing(8)
+            thumb = QLabel()
+            thumb.setPixmap(rounded(pil_to_pixmap(img), 36, 8))
+            edit = QLineEdit(caps[i] if i < len(caps) else "", maxLength=40,
+                             placeholderText=f"Caption for photo {i + 1}")
+            edit.textChanged.connect(lambda t, i=i: self.set_caption(i, t))
+            rl.addWidget(thumb)
+            rl.addWidget(edit, 1)
+            host.layout().addWidget(row)
+
+    def set_caption(self, i: int, text: str):
+        caps = list(self.collage.captions) + [""] * (len(self.photos) - len(self.collage.captions))
+        caps[i] = text
+        self.set_collage(captions=caps)
 
     def set_collage(self, **changes):
         self.collage = replace(self.collage, **changes)
@@ -1961,8 +2025,14 @@ class MainWindow(QWidget):
             slider.blockSignals(True)
             slider.setValue(getattr(d, key))
             slider.blockSignals(False)
+        self.title_edit.blockSignals(True)
+        self.title_edit.clear()
+        self.title_edit.blockSignals(False)
+        self.fill_captions()
         for group, value in ((self.shape_group, d.aspect), (self.bg_group, "White"),
-                             (self.collage_look, d.look), (self.size_group, self.collage_px)):
+                             (self.collage_look, d.look), (self.size_group, self.collage_px),
+                             (self.title_pos_group, d.title_pos), (self.font_group, d.font),
+                             (self.title_color_group, d.text_color)):
             for chip in group.buttons():
                 chip.setChecked(chip.property("value") == value)
         self.collage_view.show_collage(None, [], 1)

@@ -35,6 +35,9 @@ Editor tools:
 - **Layout:** each photo count has 3 or 4 layouts, such as equal grids or one big photo with smaller ones.
 - **On the preview:** drag a photo to choose which part shows in its cell, and scroll to zoom in (up to 4×). Drag a photo onto another cell to swap the two.
 - **Shape:** 1:1, 4:5, 3:2 or 16:9. **Spacing**, **Outer margin** and **Corner rounding** are sliders. **Background** offers preset colours, or **Custom…** to pick any colour.
+- **Title:** optional text in a band at the **Top** or **Bottom**, or **Over photos** with a soft shadow. **Auto** colour picks dark or white text to suit the background, or choose Black, White or Gold.
+- **Photo captions:** an optional caption for each photo, shown in white on a soft dark fade at the bottom of its cell. A caption stays with its photo when you swap cells.
+- **Font and Text size** apply to the title and captions. The six fonts come with Windows (Segoe UI, Arial Black, Georgia, Palatino, Segoe Print and Segoe Script), so nothing extra is bundled. If one is missing, the app uses Segoe UI or Arial instead. Text that is too long shrinks to fit.
 - **Look, Vignette and Grain** work as in the photo editor, over the whole collage.
 - **Saved size:** the long side is 3000 or 4000 px. The file is saved as `<first-cell-photo>_collage.jpg` at quality 95, and the usual `_1`, `_2`… rule means nothing is ever overwritten. No EXIF is copied, because the picture is made from several photos. The photos themselves are only read.
 

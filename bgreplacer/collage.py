@@ -6,15 +6,25 @@ Cells are numbered in reading order of their first appearance.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from math import lcm
+from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from .pipeline import finish
 
 MIN_PHOTOS, MAX_PHOTOS = 2, 9
+
+# fonts that ship with Windows; nothing is bundled. Missing ones fall back below.
+FONTS = {"Segoe UI": "seguisb.ttf", "Arial Black": "ariblk.ttf", "Georgia": "georgia.ttf",
+         "Palatino": "pala.ttf", "Segoe Print": "segoepr.ttf", "Segoe Script": "segoesc.ttf"}
+FALLBACK_FONTS = ("segoeui.ttf", "arial.ttf")
+TEXT_COLORS = {"auto": None, "black": (20, 20, 20), "white": (255, 255, 255),
+               "gold": (201, 162, 39)}
 
 
 def rows(*counts: int) -> str:
@@ -68,6 +78,12 @@ class Collage:
     look: str = "none"
     vignette: int = 0
     grain: int = 0
+    title: str = ""
+    title_pos: str = "bottom"                   # top / bottom band, or "over" the photos
+    font: str = "Segoe UI"
+    text_size: int = 40                         # 0..100, title and captions
+    text_color: str = "auto"                    # title colour, see TEXT_COLORS
+    captions: list = field(default_factory=list)   # per photo (not per cell): text
 
     def __post_init__(self):
         n = len(cells(self.layout))
@@ -81,18 +97,30 @@ def canvas_size(aspect: float, long_side: int) -> tuple[int, int]:
     return max(1, round(long_side * aspect)), long_side
 
 
+def title_px(c: Collage, size: tuple[int, int]) -> int:
+    return round((0.025 + 0.06 * c.text_size / 100) * max(size))
+
+
+def title_band(c: Collage, size: tuple[int, int]) -> int:
+    """Height of the strip a top or bottom title takes from the photos."""
+    return round(title_px(c, size) * 2.0) if c.title.strip() and c.title_pos != "over" else 0
+
+
 def cell_rects(c: Collage, size: tuple[int, int]) -> list[tuple[int, int, int, int]]:
     """Pixel boxes (x0, y0, x1, y1). Sizes are fractions of the long side, so
     the preview and the full-size picture look the same."""
     w, h = size
     m = c.margin / 100 * 0.08 * max(w, h)
     g = c.spacing / 100 * 0.04 * max(w, h) / 2           # half gap, on inner edges only
+    band = title_band(c, size)
+    top = m + (band if c.title_pos == "top" else 0)
+    ah = max(1.0, h - 2 * m - band)                      # height left for the photos
     out = []
     for l, t, r, b in cells(c.layout):
         x0 = m + l * (w - 2 * m) + (g if l > 0 else 0)
-        y0 = m + t * (h - 2 * m) + (g if t > 0 else 0)
+        y0 = top + t * ah + (g if t > 0 else 0)
         x1 = m + r * (w - 2 * m) - (g if r < 1 else 0)
-        y1 = m + b * (h - 2 * m) - (g if b < 1 else 0)
+        y1 = top + b * ah - (g if b < 1 else 0)
         out.append((round(x0), round(y0), max(round(x0) + 1, round(x1)),
                     max(round(y0) + 1, round(y1))))
     return out
@@ -129,6 +157,52 @@ def _corner_mask(size: tuple[int, int], radius: float) -> Image.Image | None:
     return m.resize(size, Image.Resampling.LANCZOS)
 
 
+@lru_cache(maxsize=32)
+def font(name: str, px: int) -> ImageFont.FreeTypeFont:
+    folder = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+    for f in (FONTS.get(name), *FALLBACK_FONTS):
+        if f and (folder / f).is_file():
+            return ImageFont.truetype(str(folder / f), px)
+    return ImageFont.load_default(px)
+
+
+def _fitted(draw: ImageDraw.ImageDraw, text: str, name: str, px: int, max_w: float):
+    """The font at px, made smaller if the text would be wider than max_w."""
+    f = font(name, px)
+    w = draw.textlength(text, font=f)
+    return font(name, max(6, int(px * max_w / w))) if w > max_w else f
+
+
+def _caption(tile: Image.Image, text: str, c: Collage):
+    """White caption on a soft dark fade at the bottom of a cell."""
+    w, h = tile.size
+    px = max(6, round(min(w, h) * (0.05 + 0.06 * c.text_size / 100)))
+    band = min(h, round(px * 2.6))
+    fade = Image.linear_gradient("L").resize((w, band)).point(lambda v: v * 150 // 255)
+    tile.paste((0, 0, 0), (0, h - band), fade)
+    draw = ImageDraw.Draw(tile)
+    draw.text((w / 2, h - px * 0.6), text, fill=(255, 255, 255), anchor="md",
+              font=_fitted(draw, text, c.font, px, w * 0.9))
+
+
+def _title(out: Image.Image, c: Collage):
+    w, h = out.size
+    m = c.margin / 100 * 0.08 * max(w, h)
+    band, px = title_band(c, out.size), title_px(c, out.size)
+    y = {"top": m + band / 2, "bottom": h - m - band / 2}.get(c.title_pos, h / 2)
+    draw = ImageDraw.Draw(out)
+    f = _fitted(draw, c.title, c.font, px, w * 0.9)
+    color = TEXT_COLORS.get(c.text_color)
+    if color is None:                          # auto: readable on what is behind it
+        r, g, b = c.bg
+        color = (20, 20, 20) if band and 0.3 * r + 0.59 * g + 0.11 * b > 140 else (255, 255, 255)
+    if not band:                               # over the photos: soft shadow for contrast
+        shadow = Image.new("L", out.size, 0)
+        ImageDraw.Draw(shadow).text((w / 2, y), c.title, fill=150, anchor="mm", font=f)
+        out.paste((0, 0, 0), (0, 0), shadow.filter(ImageFilter.GaussianBlur(px / 6)))
+    draw.text((w / 2, y), c.title, fill=color, anchor="mm", font=f)
+
+
 def render(photos: list[Image.Image], c: Collage, long_side: int) -> Image.Image:
     size = canvas_size(c.aspect, long_side)
     out = Image.new("RGB", size, tuple(c.bg))
@@ -136,8 +210,13 @@ def render(photos: list[Image.Image], c: Collage, long_side: int) -> Image.Image
         photo, cw, ch = photos[idx], x1 - x0, y1 - y0
         tile = photo.resize((cw, ch), Image.Resampling.LANCZOS,
                             box=visible_box(photo.size, (cw, ch), view))
+        text = c.captions[idx].strip() if idx < len(c.captions) else ""
+        if text:
+            _caption(tile, text, c)
         mask = _corner_mask((cw, ch), c.corners / 100 * 0.5 * min(cw, ch))
         out.paste(tile, (x0, y0), mask)
+    if c.title.strip():
+        _title(out, replace(c, title=c.title.strip()))
     if c.look != "none" or c.vignette or c.grain:
         out = Image.fromarray(finish(np.asarray(out), c.look, c.vignette, c.grain))
     return out
