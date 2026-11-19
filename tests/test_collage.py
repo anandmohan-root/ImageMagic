@@ -85,7 +85,7 @@ def test_look_applies_to_the_whole_collage():
 
 
 def test_window_collage_flow(tmp_path):
-    from PySide6.QtWidgets import QApplication, QLineEdit
+    from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit
     from bgreplacer.app import MainWindow
     from tests.test_ui_smoke import wait_idle
 
@@ -130,6 +130,10 @@ def test_window_collage_flow(tmp_path):
     rows[2].setText("Garden")
     assert w.collage.title == "Holiday" and w.collage.title_pos == "top"
     assert w.collage.captions == ["", "", "Garden"]
+    picks = w.caption_host.findChildren(QComboBox)
+    assert len(picks) == 3
+    picks[0].setCurrentIndex(picks[0].findData("heart"))
+    assert w.collage.shapes == ["heart", "rect", "rect"]
     assert list(out.iterdir()) == []                   # nothing written before Save
 
     w.save_collage()
@@ -148,6 +152,7 @@ def test_window_collage_flow(tmp_path):
     assert w.pages.currentIndex() == 0 and w.views.currentIndex() == 0 and w.photos == []
     assert w.collage_sliders["corners"][0].value() == 0
     assert w.title_edit.text() == "" and w.collage.title == "" and w.collage.captions == []
+    assert w.collage.shapes == []
     w.close()
 
 
@@ -187,3 +192,26 @@ def test_captions_follow_their_photo_and_long_text_shrinks():
 def test_missing_font_falls_back():
     assert C.font("No such font", 20) is not None
     assert C.font("Georgia", 20).size == 20
+
+
+@pytest.mark.parametrize("shape", ["circle", "heart", "hexagon", "star"])
+def test_shape_frames_mask_the_photo(shape):
+    photos = [Image.new("RGB", (100, 100), RED), Image.new("RGB", (100, 100), BLUE)]
+    c = C.Collage("AB", spacing=0, margin=0, bg=(255, 255, 255), shapes=[shape])
+    assert C.frame_box(c, (0, 0, 400, 800), 0) == (0, 200, 400, 600)    # centred square
+    out = np.asarray(C.render(photos, c, 800))
+    assert tuple(out[205, 2]) == (255, 255, 255)                         # corner: background
+    assert tuple(out[420, 200]) == RED                                   # inside the shape
+    assert tuple(out[5, 600]) == BLUE                                    # photo 2 stays a rectangle
+
+
+def test_shape_moves_with_its_photo_and_caption_goes_below():
+    photos = [Image.new("RGB", (100, 100), RED), Image.new("RGB", (100, 100), BLUE)]
+    c = C.Collage("AB", spacing=0, margin=0, bg=(255, 255, 255), shapes=["circle"],
+                  order=[1, 0], captions=["Beach"])
+    out = np.asarray(C.render(photos, c, 800))
+    assert tuple(out[5, 5]) == BLUE and tuple(out[205, 402]) == (255, 255, 255)
+    x0, y0, x1, y1 = C.frame_box(c, (400, 0, 800, 800), 0)
+    assert y1 < 800 and y0 + y1 < 800                                   # centred above the text
+    assert out[y1:800, 400:800].min() < 60                               # dark text on white
+    assert C.frame_box(C.Collage("AB", shapes=["bogus"]), (0, 0, 40, 80), 0) == (0, 0, 40, 80)

@@ -12,7 +12,8 @@ from PySide6.QtCore import (QByteArray, QEasingCurve, QObject, QPointF, QPropert
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication,
                            QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QColorDialog, QFileDialog, QFrame,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QColorDialog, QComboBox,
+                               QFileDialog, QFrame,
                                QGraphicsDropShadowEffect, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit,
                                QMessageBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy,
@@ -105,6 +106,9 @@ def stylesheet(c: dict) -> str:
     QLineEdit {{ border: 1px solid {c['border']}; border-radius: 10px; min-height: 36px;
         padding: 0 10px; font-size: 13px; background: {c['surface']}; }}
     QLineEdit:focus {{ border-color: {c['accent']}; }}
+    QComboBox {{ border: 1px solid {c['border']}; border-radius: 10px; min-height: 36px;
+        padding: 0 6px; background: {c['surface']}; }}
+    QComboBox:hover, QComboBox:focus {{ border-color: {c['accent']}; }}
     QLabel#value {{ color: {c['text']}; font-size: 12px; font-weight: 600; }}
     QSlider:horizontal {{ min-height: 26px; }}
     QSlider::sub-page:horizontal:disabled {{ background: {c['border']}; }}
@@ -858,6 +862,32 @@ def layout_icon(layout: str, color: str, dpr: float = 2.0) -> QPixmap:
     return pm
 
 
+def shape_icon(shape: str, color: str, dpr: float = 2.0) -> QPixmap:
+    """Small drawing of a frame shape, for the shape picker."""
+    s = 20
+    pm = QPixmap(int(s * dpr), int(s * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(color))
+    box = QRectF(1, 1, s - 2, s - 2)
+    pts = collage.shape_points(shape)
+    if shape == "circle":
+        p.drawEllipse(box)
+    elif pts is None:
+        p.drawRoundedRect(QRectF(1, 3, s - 2, s - 6), 3, 3)
+    else:
+        path = QPainterPath(QPointF(1 + pts[0][0] * (s - 2), 1 + pts[0][1] * (s - 2)))
+        for x, y in pts[1:]:
+            path.lineTo(1 + x * (s - 2), 1 + y * (s - 2))
+        path.closeSubpath()
+        p.drawPath(path)
+    p.end()
+    return pm
+
+
 def swatch(rgb: tuple, border: str, dpr: float = 2.0) -> QPixmap:
     pm = QPixmap(int(16 * dpr), int(16 * dpr))
     pm.setDevicePixelRatio(dpr)
@@ -1357,8 +1387,9 @@ class MainWindow(QWidget):
         self.title_color_group = self._chips(pl, colors, 4,
                                              lambda v: self.set_collage(text_color=v), d.text_color)
         pl.addSpacing(6)
-        pl.addWidget(section("PHOTO CAPTIONS"))
-        pl.addWidget(QLabel("Shown at the bottom of each photo. Leave empty for none.",
+        pl.addWidget(section("EACH PHOTO"))
+        pl.addWidget(QLabel("A frame shape and an optional caption for each photo. Rectangles "
+                            "use Corner rounding; in other shapes the caption goes below.",
                             objectName="hint", wordWrap=True))
         self.caption_host = QWidget(objectName="page")
         QVBoxLayout(self.caption_host).setContentsMargins(0, 0, 0, 0)
@@ -1882,7 +1913,7 @@ class MainWindow(QWidget):
             return
         self.photos = []
         self.collage_dirty = False
-        self.collage = replace(self.collage, captions=[])
+        self.collage = replace(self.collage, captions=[], shapes=[])
         self.fill_layouts()
         self.fill_captions()
         self.show_collage()
@@ -1905,11 +1936,11 @@ class MainWindow(QWidget):
             self.layout_grid.addWidget(chip, i // 3, i % 3)
 
     def fill_captions(self):
-        """One caption box per photo, in the order the photos were added."""
+        """Shape picker and caption box per photo, in the order the photos were added."""
         host = self.caption_host
         for w in host.findChildren(QWidget, options=Qt.FindDirectChildrenOnly):
             w.deleteLater()
-        caps = self.collage.captions
+        caps, shapes = self.collage.captions, self.collage.shapes
         for i, (_, img) in enumerate(self.photos):
             row = QWidget(host, objectName="page")
             rl = QHBoxLayout(row)
@@ -1919,15 +1950,28 @@ class MainWindow(QWidget):
             thumb.setPixmap(rounded(pil_to_pixmap(img), 36, 8))
             edit = QLineEdit(caps[i] if i < len(caps) else "", maxLength=40,
                              placeholderText=f"Caption for photo {i + 1}")
-            edit.textChanged.connect(lambda t, i=i: self.set_caption(i, t))
+            edit.textChanged.connect(lambda t, i=i: self.set_per_photo("captions", i, t, ""))
+            pick = QComboBox(toolTip="Frame shape")
+            pick.setAccessibleName(f"Frame shape for photo {i + 1}")
+            for key, name in collage.SHAPES.items():         # icons only, names as tooltips
+                pick.addItem(QIcon(shape_icon(key, self.c["text"])), "", key)
+                pick.setItemData(pick.count() - 1, name, Qt.ToolTipRole)
+            pick.setIconSize(QSize(20, 20))
+            pick.setFixedWidth(64)
+            pick.setCurrentIndex(max(0, pick.findData(shapes[i] if i < len(shapes) else "rect")))
+            pick.currentIndexChanged.connect(
+                lambda _, i=i, pick=pick: self.set_per_photo("shapes", i, pick.currentData(), "rect"))
             rl.addWidget(thumb)
+            rl.addWidget(pick)
             rl.addWidget(edit, 1)
             host.layout().addWidget(row)
 
-    def set_caption(self, i: int, text: str):
-        caps = list(self.collage.captions) + [""] * (len(self.photos) - len(self.collage.captions))
-        caps[i] = text
-        self.set_collage(captions=caps)
+    def set_per_photo(self, name: str, i: int, value, default):
+        """Set one photo's caption or shape; the list is padded to all photos."""
+        values = list(getattr(self.collage, name))
+        values += [default] * (len(self.photos) - len(values))
+        values[i] = value
+        self.set_collage(**{name: values})
 
     def set_collage(self, **changes):
         self.collage = replace(self.collage, **changes)
@@ -1963,8 +2007,9 @@ class MainWindow(QWidget):
         self.refresh()
 
     def on_cell_pan(self, cell: int, dx: float, dy: float):
-        x0, y0, x1, y1 = self.collage_view.rects[cell]
-        photo = self.photos[self.collage.order[cell]][1]
+        idx = self.collage.order[cell]
+        x0, y0, x1, y1 = collage.frame_box(self.collage, self.collage_view.rects[cell], idx)
+        photo = self.photos[idx][1]
         views = list(self.collage.views)
         views[cell] = collage.pan(photo.size, (x1 - x0, y1 - y0), views[cell], dx, dy)
         self.set_collage(views=views)

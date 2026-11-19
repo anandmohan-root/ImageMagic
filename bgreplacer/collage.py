@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
-from math import lcm
+from math import cos, lcm, pi, sin
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +23,8 @@ MIN_PHOTOS, MAX_PHOTOS = 2, 9
 FONTS = {"Segoe UI": "seguisb.ttf", "Arial Black": "ariblk.ttf", "Georgia": "georgia.ttf",
          "Palatino": "pala.ttf", "Segoe Print": "segoepr.ttf", "Segoe Script": "segoesc.ttf"}
 FALLBACK_FONTS = ("segoeui.ttf", "arial.ttf")
+SHAPES = {"rect": "Rectangle", "circle": "Circle", "heart": "Heart", "hexagon": "Hexagon",
+          "star": "Star"}
 TEXT_COLORS = {"auto": None, "black": (20, 20, 20), "white": (255, 255, 255),
                "gold": (201, 162, 39)}
 
@@ -84,6 +86,7 @@ class Collage:
     text_size: int = 40                         # 0..100, title and captions
     text_color: str = "auto"                    # title colour, see TEXT_COLORS
     captions: list = field(default_factory=list)   # per photo (not per cell): text
+    shapes: list = field(default_factory=list)     # per photo: a key of SHAPES
 
     def __post_init__(self):
         n = len(cells(self.layout))
@@ -147,13 +150,61 @@ def pan(photo_size, cell_size, view, dx: float, dy: float) -> tuple:
     return zoom, min(1.0, max(0.0, px)), min(1.0, max(0.0, py))
 
 
-def _corner_mask(size: tuple[int, int], radius: float) -> Image.Image | None:
-    if radius < 0.5:
+def shape_points(shape: str) -> list | None:
+    """Outline of a frame shape in a unit square; None for rect and circle."""
+    if shape == "hexagon":
+        return [(0.5 + 0.5 * cos(a), 0.5 + 0.5 * sin(a))
+                for a in (pi / 180 * (-90 + 60 * k) for k in range(6))]
+    if shape == "star":
+        return [(0.5 + r * cos(a), 0.54 + r * sin(a))
+                for r, a in ((0.5 if k % 2 == 0 else 0.2, pi / 180 * (-90 + 36 * k))
+                             for k in range(10))]
+    if shape == "heart":
+        ts = [2 * pi * k / 160 for k in range(160)]
+        xs = [16 * sin(t) ** 3 for t in ts]
+        ys = [-(13 * cos(t) - 5 * cos(2 * t) - 2 * cos(3 * t) - cos(4 * t)) for t in ts]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        return [((x - x0) / (x1 - x0), (y - y0) / (y1 - y0)) for x, y in zip(xs, ys)]
+    return None
+
+
+def _shape(c: Collage, idx: int) -> str:
+    return c.shapes[idx] if idx < len(c.shapes) and c.shapes[idx] in SHAPES else "rect"
+
+
+def _text(c: Collage, idx: int) -> str:
+    return c.captions[idx].strip() if idx < len(c.captions) else ""
+
+
+def _caption_px(size: tuple[int, int], c: Collage) -> int:
+    return max(6, round(min(size) * (0.05 + 0.06 * c.text_size / 100)))
+
+
+def frame_box(c: Collage, rect: tuple, idx: int) -> tuple[int, int, int, int]:
+    """Where photo idx is placed inside its cell: the whole cell for a
+    rectangle, else a centred square, leaving a strip below for a caption."""
+    x0, y0, x1, y1 = rect
+    if _shape(c, idx) == "rect":
+        return rect
+    strip = round(_caption_px((x1 - x0, y1 - y0), c) * 2) if _text(c, idx) else 0
+    s = max(1, min(x1 - x0, y1 - y0 - strip))
+    left, top = (x0 + x1 - s) // 2, y0 + (y1 - y0 - strip - s) // 2   # shape + text centred
+    return left, top, left + s, top + s
+
+
+def _shape_mask(size: tuple[int, int], shape: str, radius: float) -> Image.Image | None:
+    if shape == "rect" and radius < 0.5:
         return None
-    k = 3                                                # supersample for smooth corners
+    k = 3                                                # supersample for smooth edges
     w, h = size
     m = Image.new("L", (w * k, h * k), 0)
-    ImageDraw.Draw(m).rounded_rectangle((0, 0, w * k - 1, h * k - 1), radius * k, fill=255)
+    d = ImageDraw.Draw(m)
+    if shape == "rect":
+        d.rounded_rectangle((0, 0, w * k - 1, h * k - 1), radius * k, fill=255)
+    elif shape == "circle":
+        d.ellipse((0, 0, w * k - 1, h * k - 1), fill=255)
+    else:
+        d.polygon([(x * (w * k - 1), y * (h * k - 1)) for x, y in shape_points(shape)], fill=255)
     return m.resize(size, Image.Resampling.LANCZOS)
 
 
@@ -176,13 +227,19 @@ def _fitted(draw: ImageDraw.ImageDraw, text: str, name: str, px: int, max_w: flo
 def _caption(tile: Image.Image, text: str, c: Collage):
     """White caption on a soft dark fade at the bottom of a cell."""
     w, h = tile.size
-    px = max(6, round(min(w, h) * (0.05 + 0.06 * c.text_size / 100)))
+    px = _caption_px((w, h), c)
     band = min(h, round(px * 2.6))
     fade = Image.linear_gradient("L").resize((w, band)).point(lambda v: v * 150 // 255)
     tile.paste((0, 0, 0), (0, h - band), fade)
     draw = ImageDraw.Draw(tile)
     draw.text((w / 2, h - px * 0.6), text, fill=(255, 255, 255), anchor="md",
               font=_fitted(draw, text, c.font, px, w * 0.9))
+
+
+def _on_bg(c: Collage) -> tuple:
+    """Dark or white text, whichever reads on the background colour."""
+    r, g, b = c.bg
+    return (20, 20, 20) if 0.3 * r + 0.59 * g + 0.11 * b > 140 else (255, 255, 255)
 
 
 def _title(out: Image.Image, c: Collage):
@@ -194,8 +251,7 @@ def _title(out: Image.Image, c: Collage):
     f = _fitted(draw, c.title, c.font, px, w * 0.9)
     color = TEXT_COLORS.get(c.text_color)
     if color is None:                          # auto: readable on what is behind it
-        r, g, b = c.bg
-        color = (20, 20, 20) if band and 0.3 * r + 0.59 * g + 0.11 * b > 140 else (255, 255, 255)
+        color = _on_bg(c) if band else (255, 255, 255)
     if not band:                               # over the photos: soft shadow for contrast
         shadow = Image.new("L", out.size, 0)
         ImageDraw.Draw(shadow).text((w / 2, y), c.title, fill=150, anchor="mm", font=f)
@@ -206,15 +262,20 @@ def _title(out: Image.Image, c: Collage):
 def render(photos: list[Image.Image], c: Collage, long_side: int) -> Image.Image:
     size = canvas_size(c.aspect, long_side)
     out = Image.new("RGB", size, tuple(c.bg))
-    for (x0, y0, x1, y1), idx, view in zip(cell_rects(c, size), c.order, c.views):
-        photo, cw, ch = photos[idx], x1 - x0, y1 - y0
+    draw = ImageDraw.Draw(out)
+    for rect, idx, view in zip(cell_rects(c, size), c.order, c.views):
+        x0, y0, x1, y1 = frame_box(c, rect, idx)
+        photo, cw, ch, shape, text = photos[idx], x1 - x0, y1 - y0, _shape(c, idx), _text(c, idx)
         tile = photo.resize((cw, ch), Image.Resampling.LANCZOS,
                             box=visible_box(photo.size, (cw, ch), view))
-        text = c.captions[idx].strip() if idx < len(c.captions) else ""
-        if text:
+        if text and shape == "rect":
             _caption(tile, text, c)
-        mask = _corner_mask((cw, ch), c.corners / 100 * 0.5 * min(cw, ch))
-        out.paste(tile, (x0, y0), mask)
+        out.paste(tile, (x0, y0), _shape_mask((cw, ch), shape, c.corners / 100 * 0.5 * min(cw, ch)))
+        if text and shape != "rect":           # in the strip under the shape
+            cx0, cy0, cx1, cy1 = rect
+            px = _caption_px((cx1 - cx0, cy1 - cy0), c)
+            draw.text(((cx0 + cx1) / 2, y1 + px), text, fill=_on_bg(c), anchor="mm",
+                      font=_fitted(draw, text, c.font, px, (cx1 - cx0) * 0.9))
     if c.title.strip():
         _title(out, replace(c, title=c.title.strip()))
     if c.look != "none" or c.vignette or c.grain:

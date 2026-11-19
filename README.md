@@ -36,7 +36,9 @@ Editor tools:
 - **On the preview:** drag a photo to choose which part shows in its cell, and scroll to zoom in (up to 4×). Drag a photo onto another cell to swap the two.
 - **Shape:** 1:1, 4:5, 3:2 or 16:9. **Spacing**, **Outer margin** and **Corner rounding** are sliders. **Background** offers preset colours, or **Custom…** to pick any colour.
 - **Title:** optional text in a band at the **Top** or **Bottom**, or **Over photos** with a soft shadow. **Auto** colour picks dark or white text to suit the background, or choose Black, White or Gold.
-- **Photo captions:** an optional caption for each photo, shown in white on a soft dark fade at the bottom of its cell. A caption stays with its photo when you swap cells.
+- **Each photo** gets its own row with a frame shape picker and an optional caption. A photo's shape and caption move with it when you swap cells.
+  - **Frame shape:** Rectangle (it follows **Corner rounding**), Circle, Heart, Hexagon or Star. A shaped photo sits in a centred square in its cell, with the background colour around it; drag and scroll still choose which part shows.
+  - **Caption:** on a rectangle it's white on a soft dark fade at the bottom of the photo. On other shapes it goes under the shape, in dark or white to suit the background.
 - **Font and Text size** apply to the title and captions. The six fonts come with Windows (Segoe UI, Arial Black, Georgia, Palatino, Segoe Print and Segoe Script), so nothing extra is bundled. If one is missing, the app uses Segoe UI or Arial instead. Text that is too long shrinks to fit.
 - **Look, Vignette and Grain** work as in the photo editor, over the whole collage.
 - **Saved size:** the long side is 3000 or 4000 px. The file is saved as `<first-cell-photo>_collage.jpg` at quality 95, and the usual `_1`, `_2`… rule means nothing is ever overwritten. No EXIF is copied, because the picture is made from several photos. The photos themselves are only read.
